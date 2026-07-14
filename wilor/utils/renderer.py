@@ -1,5 +1,6 @@
 import os
-if 'PYOPENGL_PLATFORM' not in os.environ:
+import sys
+if 'PYOPENGL_PLATFORM' not in os.environ and sys.platform != 'darwin':
     os.environ['PYOPENGL_PLATFORM'] = 'egl'
 import torch
 import numpy as np

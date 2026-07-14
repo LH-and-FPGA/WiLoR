@@ -1,7 +1,8 @@
 import os 
 import sys 
-os.environ["PYOPENGL_PLATFORM"] = "egl"
-os.environ["MESA_GL_VERSION_OVERRIDE"] = "4.1"
+if sys.platform != 'darwin':
+    os.environ["PYOPENGL_PLATFORM"] = "egl"
+    os.environ["MESA_GL_VERSION_OVERRIDE"] = "4.1"
 # os.system('pip install /home/user/app/pyrender')
 # sys.path.append('/home/user/app/pyrender')
 
