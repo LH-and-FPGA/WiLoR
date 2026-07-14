@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Model weights & data (download separately)
+pretrained_models/
+mano_data/
+
+# Runtime config / outputs
+Ultralytics/
+demo_out/
+webcam_test_out.jpg
