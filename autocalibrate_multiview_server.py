@@ -17,9 +17,11 @@ from WiLoR's monocular depth would be off by considerably more.  Scale matters
 downstream: isoswarm gates fused metric positions against a fixed working
 volume and silently drops commands that fall outside it.
 
-Intrinsics are not solved.  Both cameras use the nominal pinhole model WiLoR
-itself assumes when it projects joints to the image, so the calibration stays
-consistent with the landmarks feeding it.
+Intrinsics are not solved.  Both cameras use a nominal pinhole model built from
+an assumed horizontal field of view (--hfov, default 65 degrees), which is
+close enough for most webcams.  Note this is *not* WiLoR's internal focal
+length: that one is a weak-perspective fiction around 25000 px and using it
+here collapses the epipolar geometry.
 
 After writing the calibration the process keeps the cameras and the loaded
 model and continues straight into streaming, so the rig is never disturbed
@@ -49,6 +51,7 @@ import yaml
 from landmark_server import extract_hands
 from multiview_landmark_server import (
     choose_device,
+    draw_preview,
     grab_synchronized,
     load_pipeline,
     open_cameras,
@@ -63,17 +66,42 @@ _COVERAGE_GRID = (4, 3)
 # noisier than chessboard corners, so this is looser than a board would need.
 _RANSAC_THRESHOLD_PX = 2.0
 _RANSAC_CONFIDENCE = 0.999
+# Cells outside the cameras' overlapping view can never fill, so full coverage
+# is not a reachable target; accept this fraction and stop waiting once the
+# hand has moved this many further pairs without reaching a new cell.
+_MIN_COVERAGE_RATIO = 0.6
+_COVERAGE_STALL_FRAMES = 60
+# Backstop so a run without --preview (no key to press) cannot spin forever
+# when the cameras never see the same hand.
+_MAX_ATTEMPTS = 3000
+# Below these the solve has not found consistent geometry, and writing the
+# result would silently poison fusion rather than fail visibly.
+_MIN_INLIER_RATIO = 0.5
+_MAX_RESIDUAL_PX = 5.0
+# Both cameras on a rig face roughly the same way, so a large relative
+# rotation means the solve latched onto wrong geometry.  A bad focal length
+# fails exactly this way while still reporting a low residual, because the
+# reprojection stays self-consistent under the same wrong intrinsics.
+_MAX_PLAUSIBLE_ROTATION_DEG = 60.0
 
 
-def nominal_intrinsics(model_cfg, width: int, height: int) -> np.ndarray:
-    """Build the pinhole matrix WiLoR itself uses to project joints.
+def nominal_intrinsics(width: int, height: int, hfov_deg: float) -> np.ndarray:
+    """Build a pinhole matrix from an assumed horizontal field of view.
 
-    Reusing WiLoR's own convention keeps the calibration consistent with the
-    landmarks that will be triangulated against it, which matters more here
-    than matching the physical lens exactly.
+    Do not be tempted to reuse WiLoR's own ``EXTRA.FOCAL_LENGTH /
+    MODEL.IMAGE_SIZE`` scaling here.  That is a weak-perspective convention --
+    a deliberately huge focal length paired with a large root depth so the
+    cropped hand projects almost orthographically -- and it works out to about
+    25000 px on a 1280-wide frame.  Epipolar geometry turns pixels into bearing
+    vectors, so a focal length twenty times too long squeezes every landmark
+    into a tiny angular cone and the essential matrix degenerates.
+
+    A real webcam sits near 65 degrees horizontally, about 1000 px at this
+    width.  The value is an assumption, not a measurement: getting it wrong
+    tilts the recovered rotation, so pass --hfov if the lens is unusual.
     """
 
-    focal = model_cfg.EXTRA.FOCAL_LENGTH / model_cfg.MODEL.IMAGE_SIZE * max(width, height)
+    focal = (width / 2.0) / np.tan(np.radians(hfov_deg) / 2.0)
     return np.array(
         [[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]],
         dtype=np.float64,
@@ -117,7 +145,8 @@ def coverage_cells(points: np.ndarray, width: int, height: int) -> set[tuple[int
 
 
 def collect_correspondences(
-    cameras, infer, width: int, height: int, target_frames: int, preview: bool
+    cameras, infer, width: int, height: int, target_frames: int, preview: bool,
+    preview_width: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Accumulate landmark pairs seen simultaneously by both cameras."""
 
@@ -130,15 +159,21 @@ def collect_correspondences(
     rejected_multi = 0
     rejected_missing = 0
 
+    minimum_cells = max(1, int(round(total_cells * _MIN_COVERAGE_RATIO)))
+    frames_since_new_cell = 0
+    attempts = 0
+
     print(
         f"\nWave one hand slowly through the shared field of view of both cameras.\n"
-        f"Cover the whole frame -- corners as well as centre -- and vary distance.\n"
-        f"Need {target_frames} paired frames and all {total_cells} coverage cells.\n"
+        f"Cover as much of the frame as you can -- corners too -- and vary distance.\n"
+        f"Need {target_frames} paired frames and at least {minimum_cells}/{total_cells}\n"
+        "coverage cells.  Cells outside the two cameras' overlapping view can never\n"
+        "fill, so collection also stops once coverage stops improving.\n"
         "Keep only ONE hand visible: two hands make the pairing ambiguous.\n"
-        "Press q in the preview window to abort.\n"
+        "Press q in the preview window to stop collecting and solve now.\n"
     )
 
-    while frames_used < target_frames or len(covered) < total_cells:
+    while True:
         grabbed = grab_synchronized(cameras)
         if grabbed is None:
             sys.exit("a camera failed to grab/retrieve during calibration")
@@ -164,22 +199,31 @@ def collect_correspondences(
             right = np.asarray(chosen[1]["kpts_2d"], dtype=np.float64)
             left_points.append(left)
             right_points.append(right)
+            before = len(covered)
             covered |= coverage_cells(left, width, height)
+            frames_since_new_cell = 0 if len(covered) > before else frames_since_new_cell + 1
             frames_used += 1
 
         if preview:
             panels = []
             for (camera_id, frame, hands), hand in zip(detections, chosen):
-                panel = cv2.resize(frame, (640, 360))
-                colour = (0, 200, 0) if hand is not None else (0, 0, 220)
-                cv2.putText(panel, camera_id, (12, 32), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.9, colour, 2)
+                # Every detected hand is drawn, not just the accepted one, so a
+                # second hand entering frame visibly explains why pairs stop
+                # accumulating.
+                panel = draw_preview(frame, hands, preview_width)
+                accepted = hand is not None
+                colour = (0, 200, 0) if accepted else (0, 0, 220)
+                label = f"{camera_id}: {len(hands)} hand(s)"
+                if not accepted:
+                    label += " - need exactly 1" if len(hands) != 1 else " - handedness mismatch"
+                cv2.putText(panel, label, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
                 panels.append(panel)
             canvas = np.hstack(panels)
             cv2.putText(
                 canvas,
                 f"pairs {frames_used}/{target_frames}  cells {len(covered)}/{total_cells}",
-                (12, 348), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
+                (12, canvas.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (0, 200, 0), 2)
             cv2.imshow("hand rig autocalibration", canvas)
             if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
                 break
@@ -187,6 +231,30 @@ def collect_correspondences(
         if frames_used and frames_used % 25 == 0 and not preview:
             print(f"  pairs {frames_used}/{target_frames}, "
                   f"coverage {len(covered)}/{total_cells} cells")
+
+        attempts += 1
+        if attempts >= _MAX_ATTEMPTS:
+            print(f"gave up after {attempts} frames with only {frames_used} usable pairs; "
+                  "check that both cameras see the same hand at the same time",
+                  file=sys.stderr)
+            break
+        if frames_used < target_frames:
+            continue
+        if len(covered) >= total_cells:
+            break
+        # Cells outside the cameras' shared view can never fill, so waiting on
+        # full coverage would loop forever.  Stop once the hand has kept moving
+        # without reaching anywhere new -- but say so when the reachable area
+        # came out small enough to threaten the solution.
+        if frames_since_new_cell >= _COVERAGE_STALL_FRAMES:
+            print(f"coverage stopped improving at {len(covered)}/{total_cells} cells "
+                  f"after {frames_since_new_cell} further pairs; solving with what "
+                  "the shared field of view allows")
+            if len(covered) < minimum_cells:
+                print(f"warning: only {len(covered)}/{total_cells} cells reachable, below "
+                      f"the {minimum_cells} wanted -- the cameras may overlap too little "
+                      "or be aimed too differently", file=sys.stderr)
+            break
 
     if preview:
         cv2.destroyAllWindows()
@@ -229,6 +297,36 @@ def solve_extrinsics(
     _, rotation, unit_translation, _ = cv2.recoverPose(essential, left, right, k_matrix, mask=mask)
     translation = unit_translation.reshape(3) * baseline_m
     return rotation, translation, inlier_ratio
+
+
+def relative_rotation_deg(rotation: np.ndarray) -> float:
+    """Angle of the rotation between the two cameras, in degrees."""
+
+    return float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))))
+
+
+def assess_solution(
+    rotation: np.ndarray, inlier_ratio: float, residual_px: float, hfov_deg: float
+) -> list[str]:
+    """Describe every reason this solution should not be trusted.
+
+    Each check catches a different failure.  A wrong focal length is the one
+    worth spelling out: it produces an absurd rotation while the residual stays
+    small, because reprojection remains self-consistent under the same wrong
+    intrinsics that caused the error.
+    """
+
+    problems = []
+    rotation_deg = relative_rotation_deg(rotation)
+    if rotation_deg > _MAX_PLAUSIBLE_ROTATION_DEG:
+        problems.append(f"the cameras came out {rotation_deg:.0f} deg apart, which no rig "
+                        f"this shape has -- --hfov ({hfov_deg:.0f}) is probably wrong")
+    if inlier_ratio < _MIN_INLIER_RATIO:
+        problems.append(f"only {inlier_ratio:.0%} of correspondences are inliers")
+    if residual_px > _MAX_RESIDUAL_PX:
+        problems.append(f"triangulation RMS {residual_px:.1f}px exceeds isoswarm's "
+                        f"max_reprojection_error_px ({_MAX_RESIDUAL_PX:.0f}px)")
+    return problems
 
 
 def reprojection_residual(
@@ -296,6 +394,10 @@ def main() -> None:
                         help="exactly two; the first becomes the rig origin")
     parser.add_argument("--baseline", type=float, required=True,
                         help="measured distance between the lens centres, in metres")
+    parser.add_argument("--hfov", type=float, default=65.0,
+                        help="assumed horizontal field of view in degrees")
+    parser.add_argument("--force", action="store_true",
+                        help="write the calibration even if the solve looks unreliable")
     parser.add_argument("--out", type=Path,
                         default=Path("../isoswarm/configs/calibration/hand_rig.yaml"))
     parser.add_argument("--frames", type=int, default=120,
@@ -309,6 +411,8 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9402)
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--preview-width", type=int, default=480,
+                        help="width in pixels of each preview panel")
     parser.add_argument("--fast", action="store_true", help="use FP16 on CUDA/MPS")
     parser.add_argument("--faster", action="store_true", help="FP16 plus ViT layer dropping")
     parser.add_argument("--calibrate-only", action="store_true",
@@ -340,20 +444,29 @@ def main() -> None:
     try:
         check_cameras_see_something(cameras)
         image_size = (args.width, args.height)
-        k_matrix = nominal_intrinsics(model_cfg, *image_size)
-        print(f"nominal focal length: {k_matrix[0, 0]:.1f}px, baseline: "
-              f"{args.baseline * 100:.1f}cm")
+        k_matrix = nominal_intrinsics(*image_size, args.hfov)
+        print(f"assumed hfov {args.hfov:.0f} deg -> focal {k_matrix[0, 0]:.0f}px; "
+              f"baseline {args.baseline * 100:.1f}cm")
 
         left, right = collect_correspondences(
-            cameras, infer, args.width, args.height, args.frames, args.preview)
+            cameras, infer, args.width, args.height, args.frames, args.preview,
+            args.preview_width)
         rotation, translation, inlier_ratio = solve_extrinsics(
             left, right, k_matrix, args.baseline)
         residual_px = reprojection_residual(left, right, k_matrix, rotation, translation)
         print(f"triangulation RMS: {residual_px:.2f}px")
-        if residual_px > 5.0:
-            print("warning: RMS above 5px -- isoswarm's default "
-                  "max_reprojection_error_px would reject most fused points; "
-                  "recalibrate with slower, more varied hand motion", file=sys.stderr)
+        print(f"relative rotation: {relative_rotation_deg(rotation):.1f} deg")
+        problems = assess_solution(rotation, inlier_ratio, residual_px, args.hfov)
+        if problems:
+            message = "; ".join(problems)
+            if not args.force:
+                sys.exit(
+                    f"refusing to write an unreliable calibration: {message}.\n"
+                    "Fusion would reject nearly every point and give no clue why. "
+                    "Wave more slowly over a wider area, keep one hand visible, "
+                    "and check --hfov matches the lenses.  Use --force to write anyway."
+                )
+            print(f"warning: writing despite {message}", file=sys.stderr)
 
         write_calibration(args.out, ids, image_size, k_matrix, rotation, translation,
                           len(left) // 21, inlier_ratio, residual_px)
@@ -363,7 +476,7 @@ def main() -> None:
             return
         target = (args.host, args.port)
         print(f"\nStreaming WiLoR v2 bundles to udp://{args.host}:{args.port}")
-        stream_bundles(cameras, infer, sock, target, args.preview)
+        stream_bundles(cameras, infer, sock, target, args.preview, args.preview_width)
     except KeyboardInterrupt:
         pass
     finally:
