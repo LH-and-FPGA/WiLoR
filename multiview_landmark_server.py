@@ -154,7 +154,25 @@ def load_pipeline(device: torch.device, fast: bool, faster: bool):
     return model, model_cfg, detector, use_fp16
 
 
-def stream_bundles(cameras, infer, sock, target, preview: bool) -> None:
+def draw_preview(frame, hands, width: int):
+    """Mirror and shrink one view for display, drawing skeletons at that size.
+
+    The frame is resized before drawing so the fixed line and marker sizes in
+    ``draw_hand_skeleton`` stay legible; drawing first and shrinking afterwards
+    thins the strokes below a pixel.
+    """
+
+    scale = width / frame.shape[1]
+    rendered = cv2.resize(cv2.flip(frame, 1), None, fx=scale, fy=scale)
+    for hand in hands:
+        points = hand["kpts_2d"].copy()
+        points[:, 0] = frame.shape[1] - points[:, 0]
+        draw_hand_skeleton(rendered, points * scale, hand["right"])
+    return rendered
+
+
+def stream_bundles(cameras, infer, sock, target, preview: bool,
+                   preview_width: int = 480) -> None:
     """Send one v2 bundle per synchronized capture until interrupted.
 
     ``infer`` maps one BGR frame to the ``extract_hands`` payload list, so a
@@ -186,12 +204,7 @@ def stream_bundles(cameras, infer, sock, target, preview: bool) -> None:
                 }
             )
             if preview:
-                rendered = cv2.flip(frame, 1)
-                for hand in hands:
-                    points = hand["kpts_2d"].copy()
-                    points[:, 0] = frame.shape[1] - points[:, 0]
-                    draw_hand_skeleton(rendered, points, hand["right"])
-                cv2.imshow(f"WiLoR {camera_id}", rendered)
+                cv2.imshow(f"WiLoR {camera_id}", draw_preview(frame, hands, preview_width))
 
         packet = {"version": 2, "seq": sequence, "t": bundle_timestamp, "views": views}
         sock.sendto(json.dumps(packet).encode("utf-8"), target)
@@ -239,6 +252,8 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9402)
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--preview-width", type=int, default=480,
+                        help="width in pixels of each preview window")
     parser.add_argument("--fast", action="store_true", help="use FP16 on CUDA/MPS")
     parser.add_argument("--faster", action="store_true", help="FP16 plus ViT layer dropping")
     args = parser.parse_args()
@@ -266,7 +281,7 @@ def main() -> None:
                              args.rescale_factor, args.conf, fp16=use_fp16)
 
     try:
-        stream_bundles(cameras, infer, sock, target, args.preview)
+        stream_bundles(cameras, infer, sock, target, args.preview, args.preview_width)
     except KeyboardInterrupt:
         pass
     finally:
