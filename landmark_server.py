@@ -46,10 +46,11 @@ def extract_hands(frame, model, model_cfg, detector, device, rescale_factor, con
                   fp16=False):
     """Run detection + WiLoR on one BGR frame; return the per-hand payload list."""
     detections = detector(frame, conf=conf, verbose=False)[0]
-    bboxes, is_right = [], []
+    bboxes, is_right, detector_confidences = [], [], []
     for det in detections:
         box = det.boxes.data.cpu().detach().squeeze().numpy()
         is_right.append(det.boxes.cls.cpu().detach().squeeze().item())
+        detector_confidences.append(float(det.boxes.conf.cpu().detach().squeeze().item()))
         bboxes.append(box[:4].tolist())
     if len(bboxes) == 0:
         return []
@@ -94,7 +95,7 @@ def extract_hands(frame, model, model_cfg, detector, device, rescale_factor, con
 
         world = joints + cam_t  # metric camera-frame position
 
-        conf_score = 1.0  # WiLoR has no per-hand score; the detector conf gates entry
+        conf_score = detector_confidences[n]
         hands.append({
             'lm': np.round(lm, 5).tolist(),
             'world': np.round(world, 5).tolist(),
