@@ -44,9 +44,10 @@ feature matching implies good landmarks.
 
 ```bash
 # 1. images (FreiHAND: 130 240 images, ~3.7 GB; any hand imagery works)
-curl -L -o FreiHAND_pub_v2.zip \
+mkdir -p distill/data/downloads
+curl -L -o distill/data/downloads/FreiHAND_pub_v2.zip \
   https://lmb.informatik.uni-freiburg.de/data/freihand/FreiHAND_pub_v2.zip
-unzip -q FreiHAND_pub_v2.zip 'training/rgb/*' -d distill/data
+unzip -q distill/data/downloads/FreiHAND_pub_v2.zip 'training/rgb/*' -d distill/data
 
 # 2. cache detector boxes once (~7 min; 130 223/130 240 kept)
 CUDA_VISIBLE_DEVICES=0 PYGLET_HEADLESS=true PYOPENGL_PLATFORM=egl \

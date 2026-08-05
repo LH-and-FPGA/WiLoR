@@ -45,19 +45,22 @@ CUDA 12.8。CUDA 12.8 是硬要求——本工作站的 RTX 5090 和 RTX PRO 400
 之前 `/tmp/isoswarm-wilor-env` 整个环境就是这么没的。venv 只记录基础解释器的
 路径，解释器一没，venv 立刻报废。
 
-因此解释器已改装到持久磁盘：
+因此解释器改装到**项目目录内**（不是 /tmp，也不是 /workspace 根——安装物一律
+留在当前项目里）：
 
-    export UV_PYTHON_INSTALL_DIR=/workspace/.uv-python
+    export UV_PYTHON_INSTALL_DIR="$PWD/.uv-python"
     uv python install 3.10
 
-建议把这一行写进 shell 配置。重建环境时显式指定：
+重建环境时显式指定：
 
-    UV_PYTHON_INSTALL_DIR=/workspace/.uv-python uv sync --frozen
+    UV_PYTHON_INSTALL_DIR="$PWD/.uv-python" uv sync --frozen
 
-可以这样确认当前 venv 的基础解释器不在 /tmp：
+`.uv-python/` 已加入 `.gitignore`，占约 89 MB。
+
+可以这样确认当前 venv 的基础解释器既不在 /tmp 也不在项目外：
 
     head -1 .venv-docker/pyvenv.cfg
-    # 期望：home = /workspace/.uv-python/cpython-3.10-linux-x86_64-gnu/bin
+    # 期望：home = <repo>/.uv-python/cpython-3.10.20-linux-x86_64-gnu/bin
 
 ## 可选依赖
 
