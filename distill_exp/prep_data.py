@@ -13,6 +13,7 @@ print(WILOR_DIR)
 DATA_DIR = WILOR_DIR / "distill" / "data"
 PRETRAINED_MODELS_DIR = WILOR_DIR / "pretrained_models"
 IMG_DIR = DATA_DIR / "training" / "rgb"
+OUT_PATH = WILOR_DIR / "distill_exp" / "data" / "boxes.npz"
 batch = 64
 
 
@@ -24,7 +25,7 @@ def main():
 
     for i in range(0, len(paths), batch):
         chunk = [str(p) for p in paths[i : i + batch]]
-        results = detector(chunk, verbose=True)
+        results = detector(chunk, verbose=False)
 
         for p, r in zip(chunk, results):
             if len(r.boxes) == 0:
@@ -41,6 +42,16 @@ def main():
             print(f"  {i+len(chunk)}/{len(paths)}  kept {len(keep_paths)}", flush=True)
     boxes = np.stack(boxes).astype(np.float32)
     rights = np.array(rights, dtype=np.float32)
+
+    # 存相对路径，npz 才能跨机器用；训练时再拼回去
+    rel_paths = [str(Path(p).relative_to(WILOR_DIR)) for p in keep_paths]
+
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(OUT_PATH, paths=np.array(rel_paths), boxes=boxes, rights=rights)
+    print(
+        f"kept {len(keep_paths)}/{len(paths)} images ({100*len(keep_paths)/len(paths):.1f}%)"
+    )
+    print(f"wrote {OUT_PATH}")
 
 
 if __name__ == "__main__":
