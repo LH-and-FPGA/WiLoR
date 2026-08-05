@@ -16,6 +16,8 @@ demo_out/
 webcam_test_out.jpg
 
 # Distillation (added)
+distill_data/
+distill_exp/data/
 distill/data/
 distill/runs/
 distill/*.zip

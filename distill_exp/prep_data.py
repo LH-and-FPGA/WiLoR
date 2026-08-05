@@ -10,10 +10,10 @@ from ultralytics import YOLO
 
 WILOR_DIR = Path(__file__).resolve().parent.parent
 print(WILOR_DIR)
-DATA_DIR = WILOR_DIR / "distill" / "data"
+DATA_DIR = WILOR_DIR / "distill_data"
 PRETRAINED_MODELS_DIR = WILOR_DIR / "pretrained_models"
 IMG_DIR = DATA_DIR / "training" / "rgb"
-OUT_PATH = WILOR_DIR / "distill_exp" / "data" / "boxes.npz"
+OUT_PATH = DATA_DIR / "boxes.npz"
 batch = 64
 
 
@@ -38,7 +38,7 @@ def main():
             keep_paths.append(p)
             boxes.append(b[j, :4])
             rights.append(float(r.boxes.cls[j]))
-        if (i // 64) % 20 == 0:
+        if (i // batch) % 20 == 0:
             print(f"  {i+len(chunk)}/{len(paths)}  kept {len(keep_paths)}", flush=True)
     boxes = np.stack(boxes).astype(np.float32)
     rights = np.array(rights, dtype=np.float32)
