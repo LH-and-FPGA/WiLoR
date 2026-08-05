@@ -14,3 +14,8 @@ mano_data/
 Ultralytics/
 demo_out/
 webcam_test_out.jpg
+
+# Distillation (added)
+distill/data/
+distill/runs/
+distill/*.zip
