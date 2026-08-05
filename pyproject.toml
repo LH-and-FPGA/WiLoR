@@ -1,0 +1,124 @@
+[project]
+name = "wilor-workspace"
+version = "0.1.0"
+description = "WiLoR hand reconstruction: inference, TensorRT acceleration, and backbone distillation"
+readme = "README.md"
+requires-python = "==3.10.*"
+
+dependencies = [
+    # CUDA 12.8 wheels: required for Blackwell (sm_120). The 5090 and RTX PRO 4000
+    # Blackwell in this workspace are sm_120 and will not run on older CUDA builds.
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+
+    # Upstream requirements.txt, with versions pinned to the combination verified
+    # against wilor_final.ckpt on this hardware.
+    "numpy==2.2.6",
+    "opencv-python==4.13.0.92",
+    "pytorch-lightning==2.6.5",
+    "scikit-image==0.25.2",
+    "smplx==0.1.28",
+    "yacs==0.1.8",
+    "timm==1.0.15",
+    "einops==0.8.2",
+    "pandas==2.3.3",
+    "rich==14.3.4",
+    "webdataset==1.0.2",
+    "ultralytics==8.1.34",
+    "scipy==1.15.3",
+    "pillow==12.2.0",
+
+    # pretrained_models/detector.pt is pickled with dill; torch.load cannot
+    # unpickle it without dill importable. The old environment only had it
+    # transitively, which is why upstream's requirements.txt omits it.
+    "dill",
+
+    # chumpy is a build dependency of the MANO pickle loader. It is unmaintained and
+    # only installs from git; the PyPI release predates Python 3.10.
+    "chumpy",
+
+    # Renderer. pyrender pins pyopengl==3.1.0 in its metadata but works with 3.1.10,
+    # which is what actually loads under EGL here -- see [tool.uv] override below.
+    "pyrender==0.1.45",
+    "pyopengl==3.1.10",
+]
+
+[project.optional-dependencies]
+# TensorRT / ONNX / quantisation stack. Only needed to build or run accelerated
+# engines; plain PyTorch inference does not require any of it.
+accel = [
+    "tensorrt==11.2.1.2",
+    "onnx==1.22.0",
+    "onnxscript==0.7.1",
+    "onnxruntime-gpu==1.23.2",
+    "onnx-graphsurgeon==0.6.1",
+    "onnxslim==0.1.95",
+    "nvidia-modelopt==0.45.0",
+    "torchao==0.11.0",
+    # nvidia-modelopt imports these at module load and does not declare them all.
+    "pulp",
+    "pynvml",
+    "cppimport",
+    "lief",
+    "setuptools",
+    "ninja",
+]
+
+# Backbone distillation (distill/). Everything else it needs is already in the
+# core dependency set.
+distill = [
+    "tensorboard",
+]
+
+# Upstream's Gradio demo and the hydra-driven training entrypoints.
+demo = [
+    "gradio",
+    "hydra-core",
+    "hydra-submitit-launcher",
+    "hydra-colorlog",
+    "pyrootutils",
+]
+
+[tool.uv]
+# This repository is used as a script workspace: demo.py and distill/ import `wilor`
+# from the working directory rather than from an installed distribution, matching how
+# upstream ships it. Nothing here builds the repo root as a package.
+package = false
+
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+override-dependencies = [
+    # pyrender 0.1.45's metadata pins pyopengl==3.1.0, but that fails to initialise
+    # the EGL backend used for headless rendering. 3.1.10 is what the verified
+    # environment runs.
+    "pyopengl==3.1.10",
+
+    # nvidia-modelopt 0.45.0 declares torch>=2.8. Its ONNX quantisation path -- the
+    # one this project uses to build INT8/FP8 TensorRT engines -- was verified
+    # working on torch 2.7.1, which is the version pinned for sm_120 here. Do not
+    # relax the torch pin to satisfy modelopt: 2.8 was not validated against
+    # wilor_final.ckpt on this hardware.
+    "torch==2.7.1",
+]
+
+# Keep PyTorch on the CUDA 12.8 index without shadowing normal PyPI packages.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+# Pinned to the commit both verified environments actually contain (chumpy 0.71).
+# PyPI only has a 0.70 sdist, so git is the real source, not a convenience.
+chumpy = { git = "https://github.com/mattloper/chumpy", rev = "580566eafc9ac68b2614b64d6f7aaa84eebb70da" }
+
+# chumpy's setup.py does `import pip` at build time, but uv's isolated build
+# environment has no pip, so a cold build fails with
+# `ModuleNotFoundError: No module named 'pip'`. A warm uv cache hides this, which
+# is why it only shows up on a fresh machine.
+[tool.uv.extra-build-dependencies]
+chumpy = ["pip"]

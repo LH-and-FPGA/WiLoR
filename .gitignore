@@ -19,3 +19,9 @@ webcam_test_out.jpg
 distill/data/
 distill/runs/
 distill/*.zip
+
+# uv environments and the project-local interpreter
+# (uv.lock IS committed; none of these are)
+.venv/
+.venv-docker/
+.uv-python/
